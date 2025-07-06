@@ -1,162 +1,104 @@
-
----
-
-## **Introduction**
-
-### **Overview**
-
-This document outlines the Low-Level Design (LLD) for the upgrade of Microsoft BizTalk Server 2016 environments with backend SQL Server 2016 (Standard Edition, running on Windows Server Failover Clustering with FCI) to Microsoft BizTalk Server 2020 with SQL Server 2022 Standard Edition.
-
-Each deployment consists of three servers:
-
-* One BizTalk Server (single node)
-* Two SQL Server nodes in a clustered (FCI) configuration
-
-This upgrade spans four environments:
-
-* **GB Production** (`p.local`)
-* **GB Test** (`t.local`)
-* **US Production** (`p.local`)
-* **US Test** (`t.local`)
-
-The environments are isolated, with no data replication or synchronization between GB and US. However, business applications consuming BizTalk can failover between regions in either Active/Active or Active/Passive modes. In Active/Passive mode, manual intervention is required to reconfigure BizTalk send/receive ports during failover.
-
-This upgrade is essential due to the end-of-life (EOL) status of Windows Server 2016, SQL Server 2016, and BizTalk Server 2016. All upgraded environments will maintain *like-for-like* functionality, configurations, and roles, while modernizing the software and platform stack.
-
-### **Low Level Design Scope**
-
-This document defines the architecture and deployment specifics of the upgraded environments, including:
-
-* Design of the new BizTalk Server 2020 and SQL Server 2022 FCI infrastructure
-* Logical and physical architecture details
-* Adapter usage and BizTalk runtime configuration
-* Compatibility with VMware virtual infrastructure and PowerMax SAN-backed storage
-* Constraints, interfaces, and operational dependencies
-* BizTalk-specific component decisions (e.g., Enterprise SSO, runtime only, Business Rules Engine)
-* No changes in integration flows or business logic (application-level migrations are outside scope)
-
-**Key Characteristics of Migration:**
-
-* **Migration Approach:** Parallel build (greenfield)
-* **Target = Source Parity:** Same edition and roles — BizTalk 2020 Enterprise, SQL 2022 Standard
-* **Infrastructure:**
-
-  * VMware-hosted VMs
-  * PowerMax SAN storage
-  * SQL Server using RDM for database and quorum storage
-* **Post-install Configuration:**
-
-  * Configured: Enterprise SSO, Group, BizTalk Runtime, Business Rules Engine
-  * Not Configured: BAM Tools, REST APIs, TMS
-* **Adapters in Use:**
-
-  * Native: FILE, SFTP, SMTP, FTPS, SCHEDULE
-  * Third-Party: nSoftware 2024 Adapters for FTPS and S3
-
 ---
 
 ## **Low Level Design**
 
 ### **Component 1: BizTalk Server 2020 Environment**
 
-#### **Logical Design**
+---
 
-The upgraded environment retains the existing topology and integration behavior while replacing underlying OS, BizTalk, and SQL versions.
+#### **Physical Design**
 
-Each of the four environments will follow this logical structure:
+##### **Server Details**
 
-##### **BizTalk Server Layer:**
+The following table outlines the physical (virtual) server allocations, roles, and specifications per environment.
 
-* One BizTalk Server 2020 (Enterprise Edition) per environment
-* Hosted on Windows Server 2022
-* Part of the respective domain: `p.local` or `t.local`
-* Configured with:
+| Component      | Role                            | Count | OS Version          | CPU / RAM            | Disk Layout (Example)                                                               | Domain                  |
+| -------------- | ------------------------------- | ----- | ------------------- | -------------------- | ----------------------------------------------------------------------------------- | ----------------------- |
+| BizTalk Server | Application Server              | 1     | Windows Server 2022 | 4 vCPU / 16–32 GB    | C:\ OS (VMDK) <br> D:\ BizTalk Data                                                 | p.local / t.local |
+| SQL Node 1     | SQL Server (Active/Passive FCI) | 1     | Windows Server 2022 | 8–16 vCPU / 32–64 GB | C:\ OS (VMDK) <br> E:\ SQL Data (RDM) <br> F:\ SQL Logs (RDM) <br> Q:\ Quorum (RDM) | p.local / t.local |
+| SQL Node 2     | SQL Server (Active/Passive FCI) | 1     | Windows Server 2022 | 8–16 vCPU / 32–64 GB | Same as Node 1                                                                      | p.local / t.local |
 
-  * Enterprise SSO
-  * Group
-  * BizTalk Runtime
-  * Business Rules Engine
-* Not configured:
+> Each region (GB/US) and environment (Prod/Test) has its own independent deployment.
 
-  * BAM Tools
-  * REST APIs
-  * BizTalk TMS
+**VM Platform:**
 
-##### **Adapters and Interfaces:**
-
-* Native Adapters: FILE, SFTP, SMTP, FTPS, SCHEDULE
-* nSoftware Adapters 2024:
-
-  * FTPS and S3 used for specific integrations
-  * Installed and licensed per new BizTalk installation
-* Custom ports, orchestrations, and bindings will be migrated in batches
-
-##### **SQL Server Layer:**
-
-* SQL Server 2022 Standard (Failover Cluster Instance)
-* Hosted on two VMs (per environment) configured with WSFC
-* Shared disk (RDMs) on PowerMax SAN for:
-
-  * System databases
-  * BizTalk MessageBox, DTA, SSO, and other custom BizTalk databases
-  * SQL Server logs
-* Supports High Availability with automatic failover at the database level
-* BizTalk’s connection to SQL remains static (virtual network name of FCI)
-
-##### **Virtual Infrastructure:**
-
-* All VMs hosted on VMware
-* VMDKs used for OS volumes
-* RDMs (VMFS passthrough) for SQL data/log volumes and quorum disk
-* VMware HA and DRS policies aligned with WSFC node placement
-
-##### **Cluster Layer:**
-
-* WSFC cluster configured for SQL Server HA
-* Separate clusters per environment
-* Cluster resources:
-
-  * SQL Server FCI role
-  * Quorum disk (witness)
-  * Listener IPs and DNS entries
-
-##### **Active Directory Integration:**
-
-* BizTalk and SQL Servers joined to:
-
-  * `p.local` (for GB/US Prod)
-  * `t.local` (for GB/US Test)
-* Separate service accounts provisioned per environment
-* Kerberos authentication supported and retained from current setup
-
-##### **Migration Behavior:**
-
-* Migration is non-intrusive (parallel setup)
-* Legacy BizTalk servers will remain operational during the phased migration
-* BizTalk applications, bindings, host instances, and ports will be migrated in batches
-* Post-validation of each batch, applications on legacy environment will be disabled
-* Final decommissioning of legacy BizTalk and SQL servers post full cutover
+* VMware vSphere 7.x or higher
+* VMDKs hosted on PowerMax SAN (for OS)
+* SQL data, logs, and quorum are hosted on RDMs provisioned from the same SAN
+* SQL uses shared storage in WSFC configuration (non-CSV model)
 
 ---
 
-### **Logical Topology Diagram (Textual)**
+##### **Configuration Settings**
 
-```
-+------------------------+      +------------------------+
-|   BizTalk Server 2020  | ---> | SQL Server 2022 FCI    |
-|   (WS 2022, Domain VM) |      | (2-node WSFC Cluster)  |
-|                        |      | - SQL Node 1           |
-| - Adapters: FILE, FTP  |      | - SQL Node 2           |
-| - nSoftware: S3, FTPS  |      | - Shared Storage (RDM) |
-+------------------------+      +------------------------+
+###### **BizTalk Server**
 
-          |                            |
-          |----> PowerMax SAN <--------|
-          |                            |
-      (OS VMDKs and SQL RDMs)
-```
+| Setting Area          | Value / Notes                                                                     |
+| --------------------- | --------------------------------------------------------------------------------- |
+| BizTalk Edition       | Enterprise Edition 2020                                                           |
+| Host Configuration    | Dedicated host and host instances per adapter type (FILE, SFTP, SMTP, etc.)       |
+| Service Accounts      | Separate domain service accounts for SSO, Hosts, Rules Engine                     |
+| Custom Adapters       | nSoftware 2024 Adapters (FTPS, S3) installed post BizTalk configuration           |
+| Feature Configuration | Only: Enterprise SSO, Group, Runtime, BRE <br> Skipped: BAM Tools, REST APIs, TMS |
+| BizTalk Backup Jobs   | Enabled post-configuration (via SQL Agent Jobs, part of BizTalk install)          |
+| Windows Features      | Required IIS, .NET Framework 4.8+, HTTP Activation, Message Queuing, etc.         |
+| Logging               | Event Viewer, BizTalk Admin Console, and third-party Syslog if configured         |
 
-> This layout is repeated for each of the four environments (GB/US – Test/Prod)
+###### **SQL Server 2022 (Standard) FCI**
+
+| Setting Area          | Value / Notes                                                       |
+| --------------------- | ------------------------------------------------------------------- |
+| SQL Edition           | SQL Server 2022 Standard (Failover Clustered Instance)              |
+| Cluster Nodes         | 2                                                                   |
+| SQL Service Accounts  | Separate AD service account                                         |
+| Storage Configuration | RDMs for Data, Logs, TempDB, Quorum                                 |
+| Quorum Disk           | Dedicated 1GB RDM (or witness share if no quorum disk)              |
+| SQL FCI Listener Name | Fixed, static listener name per environment (e.g., `BTSQLPRODGB01`) |
+| SQL Agent Jobs        | BizTalk Maintenance Jobs enabled                                    |
+| Antivirus Exclusions  | Configured per Microsoft SQL best practices                         |
+| Patching              | Coordinated across nodes using rolling updates in WSFC              |
+
+###### **VMware & Storage**
+
+| Area               | Value / Notes                                                           |
+| ------------------ | ----------------------------------------------------------------------- |
+| Hypervisor         | VMware vSphere (7.0 or later)                                           |
+| Guest OS           | Windows Server 2022 Standard/Datacenter                                 |
+| Storage Backend    | PowerMax SAN                                                            |
+| OS Disks           | VMDK                                                                    |
+| SQL Data/Logs      | RDM presented from SAN to each SQL node                                 |
+| Cluster Disks      | RDM (same LUN shared to both SQL nodes)                                 |
+| Backup Integration | Snapshots disabled for SQL disks; backup via SQL-aware backup solutions |
 
 ---
 
+##### **Policy Settings**
+
+###### **BizTalk Host & Host Instances**
+
+| Policy Area             | Design Approach                                                      |
+| ----------------------- | -------------------------------------------------------------------- |
+| Host Separation         | Separate hosts for Receive, Send, Orchestration, Tracking            |
+| Host Instance Isolation | Host instances run under least-privileged service accounts           |
+| Adapter Placement       | FILE/SFTP/FTPS on separate receive hosts where needed                |
+| Tracking Settings       | Enabled for all production BizTalk hosts; Test tracking kept minimal |
+
+###### **Cluster Policy**
+
+| Policy Area         | Design Approach                                                         |
+| ------------------- | ----------------------------------------------------------------------- |
+| Node Affinity       | Preferred owner set on SQL nodes; Automatic failback not enabled        |
+| Quorum              | Node and Disk Majority (or Node and File Share Majority, as applicable) |
+| Heartbeat & Timeout | WSFC defaults unless tuned per latency needs                            |
+
+###### **Maintenance Policies**
+
+| Area                   | Policy / Notes                                                              |
+| ---------------------- | --------------------------------------------------------------------------- |
+| OS Patching            | Coordinated patch windows for BizTalk and SQL Nodes (staggered)             |
+| SQL Patching           | Via WSFC rolling updates                                                    |
+| Backup Strategy        | Daily full backups, 15-minute log backups (if configured)                   |
+| Antivirus Exclusion    | Applies to BizTalk MsgBox, tracking db, temp paths, SQL data/log folders    |
+| Monitoring Integration | BizTalk Perf Counters, Event Logs, SQL Logs fed to existing SIEM (optional) |
+
+---
